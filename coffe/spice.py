@@ -4,9 +4,11 @@
 import os
 import subprocess
 import coffe.utils as utils
+from pathlib2 import Path
 
 # All .sp files should be created to use sweep_data.l to set parameters.
-HSPICE_DATA_SWEEP_PATH = "sweep_data.l"
+# HSPICE_DATA_SWEEP_PATH = "sweep_data.l"
+PARAMETERS_DATA_PATH = "parameters.l"
 
 # The contents of 
 DATA_SWEEP_PATH = "data.txt"
@@ -47,6 +49,7 @@ class SpiceInterface(object):
         param_list = parameter_dict.keys()
 
         # Write out parameters to a "easy to read format" file (this just helps for debug) 
+        # MAKING DATA.TXT
         data_file = open(DATA_SWEEP_PATH, 'w')
         data_file.write("param".ljust(40) + "value".ljust(20) + "\n")
         dashes = "-"*60
@@ -59,7 +62,20 @@ class SpiceInterface(object):
             data_file.write("\n")
         data_file.close()
 
+        # Replace this section for NGSpice 
+        
         # Write the .DATA HPSICE file. This first part writes out the header.
+        # MAKING PATAMETERS.L
+        parameters_file = open(PARAMETERS_DATA_PATH, 'w')
+        parameters_file.write("*** INCLUDE PARAMETERS_DATA \n\n")
+        parameters_file.write(".LIB PARAMETERS_DATA \n")
+        for param_name in param_list:
+        	parameters_file.write(".PARAM " + param_name + " = " + str(parameter_dict[param_name][0]) + "\n")
+        	
+        parameters_file.write(".ENDL PARAMETERS_DATA")
+        parameters_file.close()
+	 
+        """
         hspice_data_file = open(HSPICE_DATA_SWEEP_PATH, 'w')
         hspice_data_file.write(".DATA sweep_data")
         item_counter = 0
@@ -84,12 +100,12 @@ class SpiceInterface(object):
                     hspice_data_file.write(str(parameter_dict[param_name][i]) + " ")
                 item_counter += 1
             hspice_data_file.write ("\n")
-    
+    	
         # Add the footer
         hspice_data_file.write(".ENDDATA")
     
         hspice_data_file.close()
-    
+    	"""
         return
     
 
@@ -141,19 +157,18 @@ class SpiceInterface(object):
 
         sp_dir = os.path.dirname(sp_path)
         sp_filename = os.path.basename(sp_path)
-  
         # Setup the .DATA sweep file with parameters in 'parameter_dict' 
         self._setup_data_sweep_file(parameter_dict)
  
         # Change working dir so that SPICE output files are created in circuit subdirectory
         saved_cwd = os.getcwd()
         os.chdir(sp_dir)
-         
+        
         # Creat an output file having the ending .lis
         # Run the SPICE simulation and capture output
         output_filename = sp_filename.rstrip(".sp") + ".lis"
         output_file = open(output_filename, "w")
-
+        
         hspice_success = False
         hspice_runs = 0
 
@@ -164,34 +179,43 @@ class SpiceInterface(object):
         #    In this case, we check if the ".mt0" exists, if not, we run hspice again. 
         while (not hspice_success) :
             utils.check_for_time()
-            subprocess.call(["hspice", sp_filename], stdout=output_file, stderr=output_file)
-
+            subprocess.call(["ngspice", sp_filename], stdout=output_file, stderr=output_file)
+            
+	    		
             # how come this file is closed here, it should be closed only if there is a success
             # since else the call process will write in a closed file
             ##output_file.close()
-             
+            
             # HSPICE should print the measurements in a file having the same
             # name as the output file with .mt0 ending
+           
             mt0_path = output_filename.replace(".lis", ".mt0")
+            
+            p = Path(output_filename)
+	    p.rename(p.with_suffix('.mt0'))
 
+          
             # check that the ".mt0" file is there
+            
+            #print(os.path.isfile(mt0_path))
+            
             if os.path.isfile(mt0_path) :
                 # store the measurments in a dictionary
-                spice_measurements = self.parse_mt0(mt0_path)
+                spice_measurements = self.parse_mt1(mt0_path)
                 # delete results file to avoid confusion in future runs
                 os.remove(mt0_path)
                 hspice_success = True
                 output_file.close()
-            # HSPICE failed to run
+            # NGSPICE failed to run
             else :
                 hspice_runs = hspice_runs + 1
                 if hspice_runs > 10 :
-                    print "----------------------------------------------------------"
-                    print "                  HSPICE failed to run                    "
-                    print "----------------------------------------------------------"
-                    print ""
+                    print ("----------------------------------------------------------")
+                    print ("                  NGSPICE failed to run                    ")
+                    print ("----------------------------------------------------------")
+                    print ("")
                     exit(2)
-  
+           
         # Update simulation counter with the number of simulations done by 
         # adding the length of the list of parameter values inside the dictionary
         self.simulation_counter += len(parameter_dict.itervalues().next())
@@ -201,6 +225,40 @@ class SpiceInterface(object):
            
         return spice_measurements
 
+    def parse_mt1(self, filepath):
+    
+    	measurements = {}
+        meas_names = []
+        mt0_file = open(filepath, 'r')
+        
+        for line in mt0_file:
+        	
+            # Ignore these lines
+            if line.startswith("$"):
+                continue
+            if line.startswith("."):
+                continue
+            if line.startswith("meas_"):
+            	line = line.replace("=", "")
+            	words = line.split()
+            	#print(words[0])
+            	measurements[words[0]] = words[1]
+            	
+            key1 = "meas_total_tfall"
+            key2 = "meas_total_trise"
+            key3 = "meas_avg_power"
+            if key1 not in measurements.keys():
+            	measurements[key1]='0.0'
+    		
+            if key2 not in measurements.keys():
+            	measurements[key2]='0.0'
+            
+            if key3 not in measurements.keys():
+            	measurements[key3]='0.0'
+            
+	print(measurements)
+	mt0_file.close()
+	return measurements
 
     def parse_mt0(self, filepath):
         """
@@ -244,9 +302,10 @@ class SpiceInterface(object):
         meaz4counter = 0
         meaz5counter = 0
         meaz6counter = 0
-    
         # Open the file for reading
+
         mt0_file = open(filepath, 'r')
+        
     
         # The first thing we expect to find is the measurement names.
         # We use the 'parsing_names' flag to show that we are parsing the names.
@@ -263,26 +322,35 @@ class SpiceInterface(object):
             if parsing_names:
                 words = line.split()
                 for meas_name in words:
+                    
                     meas_names.append(meas_name)
+                    
                     measurements[meas_name] = []
+                    
                     if "meaz1" in meas_name:
                         meaz1counter += 1
                         meaz1_names.append(meas_name)
+                        print(meaz1_names)
                     if "meaz2" in meas_name:
                         meaz2counter += 1
                         meaz2_names.append(meas_name)
+                        print(meaz2_names)
                     if "meaz3" in meas_name:
                         meaz3counter += 1
                         meaz3_names.append(meas_name)
+                        print(meaz3_names)
                     if "meaz4" in meas_name:
                         meaz4counter += 1
                         meaz4_names.append(meas_name)
+                        print(meaz4_names)
                     if "meaz5" in meas_name:
                         meaz5counter += 1
                         meaz5_names.append(meas_name)
+                        print(meaz5_names)
                     if "meaz6" in meas_name:
                         meaz6counter += 1
                         meaz6_names.append(meas_name)
+                        print(meaz6_names)
                     # When we find 'alter#' we are done parsing measurement names.
                     if meas_name.startswith("alter#"):
                         num_measurements = len(meas_names)
@@ -299,9 +367,6 @@ class SpiceInterface(object):
                     current_meas += 1
                     if current_meas == num_measurements:
                         current_meas = 0
-
-
-        
         mt0_file.close()
 
         # This part is added to support having tow different fanins (e.g. ram rowdecoder)
@@ -326,5 +391,5 @@ class SpiceInterface(object):
             for x in range(0,len(meaz2_names)):
                 newname = meaz2_names[x].replace("meaz2_", "meas_")
                 measurements[newname] = measurements[meaz2_names[x]]
-
+	#print(measurements)
         return measurements         
